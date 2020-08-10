@@ -43,12 +43,13 @@ type TTNMessageMeta struct {
 type TTNMessage struct {
 	AppID          string `json:"app_id"`          // Same as in the topic
 	DevID          string `json:"dev_id"`          // Device ID
-	HardwareSerial int64  `json:"hardware_serial"` // In case of LoRaWAN: the DevEUI
-	Port           int8   `json:"port"`            // LoRaWAN FPort
-	Counter        int8   `json:"counter"`         // LoRaWAN frame counter
+	HardwareSerial string `json:"hardware_serial"` // In case of LoRaWAN: the DevEUI
+	Port           int16  `json:"port"`            // LoRaWAN FPort
+	Counter        int16  `json:"counter"`         // LoRaWAN frame counter
 	IsRetry        bool   `json:"isRetry"`         // Is set to true if this message is a retry (you could also detect this from the counter)
 	Confirmed      bool   `json:"confirmed"`       // Is set to true if this message was a confirmed message
 	PayloadRaw     []byte `json:"payload_raw"`     // Base64 encoded payload: [0x01, 0x02, 0x03, 0x04]
+	DownlinkURL    string `json:"downlink_url"`
 }
 
 func main() {
@@ -99,6 +100,7 @@ var ProcessUplink = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request
 	var m TTNMessage
 	jsonError := json.Unmarshal(body, &m)
 	if jsonError != nil {
+		fmt.Printf("Unable to Parse JSON: %s\n", jsonError.Error)
 		http.Error(w, jsonError.Error(), 500)
 		return
 	}
