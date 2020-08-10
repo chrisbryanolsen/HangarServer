@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
-	"log"
 	"net/http"
 
 	"github.com/golang/gddo/httputil/header"
@@ -40,17 +39,17 @@ type TTNMessageMeta struct {
 }
 */
 
+// TTNMessage is the format of the message sent from The Things Network uplink callback
 type TTNMessage struct {
-	app_id          string // Same as in the topic
-	dev_id          string // Same as in the topic
-	hardware_serial int64  // In case of LoRaWAN: the DevEUI
-	port            int8   // LoRaWAN FPort
-	counter         int8   // LoRaWAN frame counter
-	is_retry        bool   // Is set to true if this message is a retry (you could also detect this from the counter)
-	confirmed       bool   // Is set to true if this message was a confirmed message
+	AppID          string `json:"app_id"`          // Same as in the topic
+	DevID          string `json:"dev_id"`          // Device ID
+	HardwareSerial int64  `json:"hardware_serial"` // In case of LoRaWAN: the DevEUI
+	Port           int8   `json:"port"`            // LoRaWAN FPort
+	Counter        int8   `json:"counter"`         // LoRaWAN frame counter
+	IsRetry        bool   `json:"isRetry"`         // Is set to true if this message is a retry (you could also detect this from the counter)
+	Confirmed      bool   `json:"confirmed"`       // Is set to true if this message was a confirmed message
+	PayloadRaw     []byte `json:"payload_raw"`     // Base64 encoded payload: [0x01, 0x02, 0x03, 0x04]
 }
-
-//payload_raw byte[]         // Base64 encoded payload: [0x01, 0x02, 0x03, 0x04]
 
 func main() {
 	fmt.Println("Hello, world.")
@@ -60,14 +59,14 @@ func main() {
 	// On the default page we will simply serve our static index page.
 	r.Handle("/", http.FileServer(http.Dir("../views/")))
 
+	// Handle uplinks Posted from TTN from each Hangar Device
+	r.Handle("/uplink/", ProcessUplink).Methods("POST")
+
 	// We will setup our server so we can serve static assest like images, css from the /static/{file} route
 	r.PathPrefix("/static/").Handler(http.StripPrefix("/static/", http.FileServer(http.Dir("../static/"))))
 
 	// Our application will run on port 9000. Here we declare the port and pass in our router.
 	http.ListenAndServe(":9000", r)
-
-	// Handle uplinks Posted from TTN from each Hangar Device
-	r.Handle("/uplink/", ProcessUplink).Methods("POST")
 }
 
 // ProcessUplink Decodes / unmarshals the JSON uplink object from TTN,
@@ -89,10 +88,22 @@ var ProcessUplink = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request
 		}
 	}
 
-	var m TTNMessage
 	body, err := ioutil.ReadAll(r.Body)
+	defer r.Body.Close()
 	if err != nil {
-		log.Fatal(err)
+		http.Error(w, err.Error(), 500)
+		return
 	}
-	json.Unmarshal(body, &m)
+	fmt.Println(string(body))
+
+	var m TTNMessage
+	jsonError := json.Unmarshal(body, &m)
+	if jsonError != nil {
+		http.Error(w, jsonError.Error(), 500)
+		return
+	}
+
+	fmt.Printf("Process Uplink From App: %s\n", m.AppID)
+	fmt.Printf("Process Uplink From Device: %s\n", m.DevID)
+	fmt.Printf("Serial: %v\n", m.HardwareSerial)
 })
