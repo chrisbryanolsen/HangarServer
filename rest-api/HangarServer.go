@@ -58,8 +58,9 @@ type TTNMessage struct {
 
 // ClientMsg is the Command / status update message sent from clients
 type ClientMsg struct {
-	Cmd    string `codec:"cmd"`
-	MyTime int64  `codec:"my-time"`
+	Cmd        string `codec:"cmd"`
+	MyTime     int64  `codec:"my-time"`
+	PowerState []bool `codec:"state"`
 }
 
 // ClientResp is sent as a downlink to client devices to configure / setup that device
@@ -192,6 +193,8 @@ var ProcessUplink = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request
 
 	fmt.Printf("Client Command: %v\n", clientMsg.Cmd)
 	fmt.Printf("Client Time: %v\n", clientMsg.MyTime)
+	fmt.Printf("Power Port 1 State: %v\n", clientMsg.PowerState[0])
+	fmt.Printf("Power Port 2 State: %v\n", clientMsg.PowerState[1])
 
 	if clientMsg.Cmd == "start" {
 		startupRequest(&ttnMsg, &clientMsg)
