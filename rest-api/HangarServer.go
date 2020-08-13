@@ -64,9 +64,9 @@ type ClientMsg struct {
 
 // ClientResp is sent as a downlink to client devices to configure / setup that device
 type ClientResp struct {
-	Cmd     string `json:"cmd"`
-	CurTime int64  `json:"cur-time"` // Current UTC time from the server, used to set device time
-	CmdData []byte `json:"cmd-data"` // Data for the command
+	Cmd     string `codec:"cmd"`
+	CurTime int64  `codec:"cur-time"` // Current UTC time from the server, used to set device time
+	CmdData []byte `codec:"cmd-data"` // Data for the command
 }
 
 // DownlinkMsg contains a message to be sent back to TTN and be downloaded by the device
@@ -133,12 +133,20 @@ func startupRequest(ttnMsg *TTNMessage, clientMsg *ClientMsg) error {
 	now := time.Now()
 	sched := []byte("Here is a string....")
 	clientResp := ClientResp{"init", now.Unix(), sched}
-	jsonReq, jsonError := json.Marshal(&clientResp)
-	if jsonError != nil {
-		return fmt.Errorf("Unable to Encode JSON Request: %s, %w", jsonError.Error(), jsonError)
+
+	var mh codec.Handle = new(codec.MsgpackHandle)
+	var msgResp []byte
+	var dec *codec.Encoder = codec.NewEncoderBytes(&msgResp, mh)
+	encError := dec.Encode(&clientResp)
+	if encError != nil {
+		return fmt.Errorf("Unable to Encode Client Response Message: %s, %w", encError.Error(), encError)
 	}
-	downlinkMsg := DownlinkMsg{ttnMsg.DevID, ttnMsg.Port, false, jsonReq}
-	jsonReq, jsonError = json.Marshal(&downlinkMsg)
+
+	downlinkMsg := DownlinkMsg{ttnMsg.DevID, ttnMsg.Port, false, msgResp}
+	jsonReq, jsonError := json.Marshal(&downlinkMsg)
+	if jsonError != nil {
+		return fmt.Errorf("Unable to Json Encode Downlink Message: %s, %w", jsonError.Error(), jsonError)
+	}
 
 	resp, err := http.Post(ttnMsg.DownlinkURL, "application/json", bytes.NewBuffer(jsonReq))
 	if err != nil {
