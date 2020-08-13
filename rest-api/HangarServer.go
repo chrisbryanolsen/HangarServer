@@ -1,13 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"net/http"
+	"time"
 
 	"github.com/golang/gddo/httputil/header"
 	"github.com/gorilla/mux"
+
+	"github.com/ugorji/go/codec"
 )
 
 /*
@@ -52,8 +56,29 @@ type TTNMessage struct {
 	DownlinkURL    string `json:"downlink_url"`
 }
 
+// ClientMsg is the Command / status update message sent from clients
+type ClientMsg struct {
+	Cmd    string `codec:"cmd"`
+	MyTime int64  `codec:"my-time"`
+}
+
+// ClientResp is sent as a downlink to client devices to configure / setup that device
+type ClientResp struct {
+	Cmd     string `json:"cmd"`
+	CurTime int64  `json:"cur-time"` // Current UTC time from the server, used to set device time
+	CmdData []byte `json:"cmd-data"` // Data for the command
+}
+
+// DownlinkMsg contains a message to be sent back to TTN and be downloaded by the device
+type DownlinkMsg struct {
+	DevID      string `json:"dev_id"`      // Device ID
+	Port       int16  `json:"port"`        // LoRaWAN FPort
+	Confirmed  bool   `json:"confirmed"`   // Is set to true if this message was a confirmed message
+	PayloadRaw []byte `json:"payload_raw"` // Base64 encoded payload: [0x01, 0x02, 0x03, 0x04]
+}
+
 func main() {
-	fmt.Println("Hello, world.")
+	fmt.Println("Hangar Server Startup.")
 	// Here we are instantiating the gorilla/mux router
 	r := mux.NewRouter()
 
@@ -70,10 +95,69 @@ func main() {
 	http.ListenAndServe(":9000", r)
 }
 
+// decodeUplink will unmarshal the JSON data recived into a struct and also decode the MessagePack payload
+// that is sent from the client device and should include a client command request.
+func decodeUplink(r *http.Request) (msg TTNMessage, clientMsg ClientMsg, err error) {
+	body, err := ioutil.ReadAll(r.Body)
+	defer r.Body.Close()
+	if err != nil {
+		return msg, clientMsg, fmt.Errorf("Unable to Read Body: %s, %w", err.Error(), err)
+	}
+	//fmt.Println(string(body))
+
+	jsonError := json.Unmarshal(body, &msg)
+	if jsonError != nil {
+		return msg, clientMsg, fmt.Errorf("Unable to Parse JSON: %s, %w", jsonError.Error(), jsonError)
+	}
+
+	var mh codec.Handle = new(codec.MsgpackHandle)
+	var dec *codec.Decoder = codec.NewDecoderBytes(msg.PayloadRaw, mh)
+	decError := dec.Decode(&clientMsg)
+	if decError != nil {
+		return msg, clientMsg, fmt.Errorf("Unable to Decode MessagePack: %s, %w", decError.Error(), decError)
+	}
+
+	fmt.Printf("Process Uplink From App: %s\n", msg.AppID)
+	fmt.Printf("Process Uplink From Device: %s\n", msg.DevID)
+	fmt.Printf("Serial: %v\n", msg.HardwareSerial)
+
+	return msg, clientMsg, err
+}
+
+// startupRequest will process the startup request message from a client and send back the current time and
+// any power schedule that has been defined for this device
+func startupRequest(ttnMsg *TTNMessage, clientMsg *ClientMsg) error {
+	fmt.Printf("Send Client Startup Response: %s\n", ttnMsg.DevID)
+	fmt.Printf("Send Response To: %s\n", ttnMsg.DownlinkURL)
+
+	now := time.Now()
+	sched := []byte("Here is a string....")
+	clientResp := ClientResp{"init", now.Unix(), sched}
+	jsonReq, jsonError := json.Marshal(&clientResp)
+	if jsonError != nil {
+		return fmt.Errorf("Unable to Encode JSON Request: %s, %w", jsonError.Error(), jsonError)
+	}
+	downlinkMsg := DownlinkMsg{ttnMsg.DevID, ttnMsg.Port, false, jsonReq}
+	jsonReq, jsonError = json.Marshal(&downlinkMsg)
+
+	resp, err := http.Post(ttnMsg.DownlinkURL, "application/json", bytes.NewBuffer(jsonReq))
+	if err != nil {
+		return fmt.Errorf("Unable to Send DownLink Request: %s, %w", err.Error(), err)
+	}
+	defer resp.Body.Close()
+
+	fmt.Println("Response Status:", resp.Status)
+	fmt.Println("Response Headers:", resp.Header)
+	body, _ := ioutil.ReadAll(resp.Body)
+	fmt.Println("Response Body:", string(body))
+
+	return nil
+}
+
 // ProcessUplink Decodes / unmarshals the JSON uplink object from TTN,
 // See https://www.thethingsnetwork.org/docs/applications/http/ for a description of the JSON payload.
 var ProcessUplink = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-	fmt.Println("Process Uplink")
+	fmt.Println("\nProcess Uplink")
 
 	// If the Content-Type header is present, check that it has the value
 	// application/json. Note that we are using the gddo/httputil/header
@@ -89,23 +173,19 @@ var ProcessUplink = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request
 		}
 	}
 
-	body, err := ioutil.ReadAll(r.Body)
-	defer r.Body.Close()
+	// Unmarshal the JSON data and pull out the client command that was sent
+	ttnMsg, clientMsg, err := decodeUplink(r)
 	if err != nil {
-		http.Error(w, err.Error(), 500)
-		return
-	}
-	fmt.Println(string(body))
-
-	var m TTNMessage
-	jsonError := json.Unmarshal(body, &m)
-	if jsonError != nil {
-		fmt.Printf("Unable to Parse JSON: %s\n", jsonError.Error)
-		http.Error(w, jsonError.Error(), 500)
+		fmt.Printf("Unable to Parse / Decode JSON: %s", err.Error())
+		msg := "Invalid JSON or MessagePack payload"
+		http.Error(w, msg, http.StatusBadRequest)
 		return
 	}
 
-	fmt.Printf("Process Uplink From App: %s\n", m.AppID)
-	fmt.Printf("Process Uplink From Device: %s\n", m.DevID)
-	fmt.Printf("Serial: %v\n", m.HardwareSerial)
+	fmt.Printf("Client Command: %v\n", clientMsg.Cmd)
+	fmt.Printf("Client Time: %v\n", clientMsg.MyTime)
+
+	if clientMsg.Cmd == "start" {
+		startupRequest(&ttnMsg, &clientMsg)
+	}
 })
