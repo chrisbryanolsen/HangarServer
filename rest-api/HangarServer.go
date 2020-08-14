@@ -193,8 +193,10 @@ var ProcessUplink = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request
 
 	fmt.Printf("Client Command: %v\n", clientMsg.Cmd)
 	fmt.Printf("Client Time: %v\n", clientMsg.MyTime)
-	fmt.Printf("Power Port 1 State: %v\n", clientMsg.PowerState[0])
-	fmt.Printf("Power Port 2 State: %v\n", clientMsg.PowerState[1])
+	if len(clientMsg.PowerState) == 2 {
+		fmt.Printf("Power Port 1 State: %v\n", clientMsg.PowerState[0])
+		fmt.Printf("Power Port 2 State: %v\n", clientMsg.PowerState[1])
+	}
 
 	if clientMsg.Cmd == "start" {
 		startupRequest(&ttnMsg, &clientMsg)
