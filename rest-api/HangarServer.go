@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/golang/gddo/httputil/header"
 	"github.com/gorilla/mux"
 
+	"github.com/gomodule/redigo/redis"
 	"github.com/ugorji/go/codec"
 )
 
@@ -58,6 +60,8 @@ type TTNMessage struct {
 
 // ClientMsg is the Command / status update message sent from clients
 type ClientMsg struct {
+	DevID      string // Device ID
+	MsgTime    int64  // The Time the server recived the message (persisted in Redis)
 	Cmd        string `codec:"cmd"`
 	MyTime     int64  `codec:"my-time"`
 	PowerState []bool `codec:"state"`
@@ -65,9 +69,16 @@ type ClientMsg struct {
 
 // ClientResp is sent as a downlink to client devices to configure / setup that device
 type ClientResp struct {
-	Cmd     string `codec:"cmd"`
-	CurTime int64  `codec:"cur-time"` // Current UTC time from the server, used to set device time
-	CmdData []byte `codec:"cmd-data"` // Data for the command
+	Cmd     string     `codec:"cmd"`
+	CurTime int64      `codec:"cur-time"` // Current UTC time from the server, used to set device time
+	Sched   []Schedule `codec:"cmd-data"` // Data for the command
+}
+
+// Schedule defines a scheduled power change event
+type Schedule struct {
+	State bool   `codec:"st"`  // Power State True = ON
+	Dow   string `codec:"dow"` // Day Of Week for this schedule 0 = Mon, 6 = Sun
+	Time  string `codec:"tm"`  // Time in UTC '1530' when the scheduled power state should change
 }
 
 // DownlinkMsg contains a message to be sent back to TTN and be downloaded by the device
@@ -78,8 +89,17 @@ type DownlinkMsg struct {
 	PayloadRaw []byte `json:"payload_raw"` // Base64 encoded payload: [0x01, 0x02, 0x03, 0x04]
 }
 
+// Redis data connection pooling
+var (
+	pool *redis.Pool
+)
+
 func main() {
 	fmt.Println("Hangar Server Startup.")
+
+	// Create the Redis Connection Pool
+	pool = newPool()
+
 	// Here we are instantiating the gorilla/mux router
 	r := mux.NewRouter()
 
@@ -96,6 +116,88 @@ func main() {
 	http.ListenAndServe(":9000", r)
 }
 
+// newPool configures the connection pool to our redis cache persisted store
+func newPool() *redis.Pool {
+	return &redis.Pool{
+		// Maximum number of idle connections in the pool.
+		MaxIdle: 10,
+		// max number of connections
+		MaxActive:   25,
+		IdleTimeout: 300 * time.Second,
+		Wait:        true,
+
+		// Test the connection to make sure it is still viable
+		TestOnBorrow: func(c redis.Conn, t time.Time) error {
+			if time.Since(t) < time.Minute {
+				return nil
+			}
+			_, err := c.Do("PING")
+			return err
+		},
+
+		// Dial is an application supplied function for creating and
+		// configuring a connection.
+		Dial: func() (redis.Conn, error) {
+			c, err := redis.Dial("tcp", "192.168.0.15:6379")
+			if err != nil {
+				panic(err.Error())
+			}
+			return c, err
+		},
+	}
+}
+
+// saveStatus saves the status received from a device in the redis cache. If have an expire time set on
+// the record so status records do not persist forever.
+func saveStatus(clientMsg *ClientMsg) error {
+	conn := pool.Get()
+	defer conn.Close()
+
+	// Marshal the status data into JSON to store in the cache
+	json, err := json.Marshal(clientMsg)
+	if err != nil {
+		return err
+	}
+	s := string(json)
+
+	// Create the Key for the status record
+	tm := strconv.FormatUint(uint64(clientMsg.MsgTime), 10)
+	key := "STAT:" + clientMsg.DevID + ":" + tm
+	fmt.Println("Status Key: " + key)
+	fmt.Println("Status JSON: " + s)
+
+	conn.Send("MULTI")
+	conn.Send("SET", key, s)
+	conn.Send("EXPIRE", key, 86400*7) // Keep Status records 7 days
+	_, err = conn.Do("EXEC")
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+// getSched reads the current device schedule from the redis cache
+func getSched(clientMsg *ClientMsg) (sched []Schedule, err error) {
+	conn := pool.Get()
+	defer conn.Close()
+
+	// Build the Key for the SCHED record
+	key := "SCHED:" + clientMsg.DevID
+	fmt.Println("Sched Key: " + key)
+
+	rslt, err := redis.Bytes(conn.Do("GET", key))
+	if err != nil {
+		return nil, fmt.Errorf("Unable to Query Redis: %s, %w", err.Error(), err)
+	}
+
+	err = json.Unmarshal(rslt, &sched)
+	if err != nil {
+		return nil, fmt.Errorf("Unable to Parse JSON Redis Result: %s, %w", err.Error(), err)
+	}
+
+	return sched, err
+}
+
 // decodeUplink will unmarshal the JSON data recived into a struct and also decode the MessagePack payload
 // that is sent from the client device and should include a client command request.
 func decodeUplink(r *http.Request) (msg TTNMessage, clientMsg ClientMsg, err error) {
@@ -106,17 +208,22 @@ func decodeUplink(r *http.Request) (msg TTNMessage, clientMsg ClientMsg, err err
 	}
 	//fmt.Println(string(body))
 
-	jsonError := json.Unmarshal(body, &msg)
-	if jsonError != nil {
-		return msg, clientMsg, fmt.Errorf("Unable to Parse JSON: %s, %w", jsonError.Error(), jsonError)
+	err = json.Unmarshal(body, &msg)
+	if err != nil {
+		return msg, clientMsg, fmt.Errorf("Unable to Parse JSON: %s, %w", err.Error(), err)
 	}
 
 	var mh codec.Handle = new(codec.MsgpackHandle)
 	var dec *codec.Decoder = codec.NewDecoderBytes(msg.PayloadRaw, mh)
-	decError := dec.Decode(&clientMsg)
-	if decError != nil {
-		return msg, clientMsg, fmt.Errorf("Unable to Decode MessagePack: %s, %w", decError.Error(), decError)
+	err = dec.Decode(&clientMsg)
+	if err != nil {
+		return msg, clientMsg, fmt.Errorf("Unable to Decode MessagePack: %s, %w", err.Error(), err)
 	}
+
+	// Update the current server time into the message for later use
+	now := time.Now()
+	clientMsg.MsgTime = now.Unix()
+	clientMsg.DevID = msg.DevID
 
 	fmt.Printf("Process Uplink From App: %s\n", msg.AppID)
 	fmt.Printf("Process Uplink From Device: %s\n", msg.DevID)
@@ -131,8 +238,13 @@ func startupRequest(ttnMsg *TTNMessage, clientMsg *ClientMsg) error {
 	fmt.Printf("Send Client Startup Response: %s\n", ttnMsg.DevID)
 	fmt.Printf("Send Response To: %s\n", ttnMsg.DownlinkURL)
 
+	// Query Redis Cache for the schedule information
+	sched, err := getSched(clientMsg)
+	if err != nil {
+		return fmt.Errorf("Unable to Retrive device schedule: %s, %w", err.Error(), err)
+	}
+
 	now := time.Now()
-	sched := []byte("Here is a string....")
 	clientResp := ClientResp{"init", now.Unix(), sched}
 
 	var mh codec.Handle = new(codec.MsgpackHandle)
@@ -200,5 +312,10 @@ var ProcessUplink = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request
 
 	if clientMsg.Cmd == "start" {
 		startupRequest(&ttnMsg, &clientMsg)
+	} else if clientMsg.Cmd == "status" {
+		err = saveStatus(&clientMsg)
+		if err != nil {
+			fmt.Printf("Unable Persist Status Message: %s", err.Error())
+		}
 	}
 })
