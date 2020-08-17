@@ -76,9 +76,9 @@ type ClientResp struct {
 
 // Schedule defines a scheduled power change event
 type Schedule struct {
-	State bool   `codec:"st"`  // Power State True = ON
-	Dow   string `codec:"dow"` // Day Of Week for this schedule 0 = Mon, 6 = Sun
-	Time  string `codec:"tm"`  // Time in UTC '1530' when the scheduled power state should change
+	St  bool   `codec:"st"`  // Power State True = ON
+	Dow string `codec:"dow"` // Day Of Week for this schedule 0 = Mon, 6 = Sun
+	Tm  string `codec:"tm"`  // Time in UTC '1530' when the scheduled power state should change
 }
 
 // DownlinkMsg contains a message to be sent back to TTN and be downloaded by the device
@@ -190,6 +190,7 @@ func getSched(clientMsg *ClientMsg) (sched []Schedule, err error) {
 		return nil, fmt.Errorf("Unable to Query Redis: %s, %w", err.Error(), err)
 	}
 
+	fmt.Println("Sched Json: " + string(rslt))
 	err = json.Unmarshal(rslt, &sched)
 	if err != nil {
 		return nil, fmt.Errorf("Unable to Parse JSON Redis Result: %s, %w", err.Error(), err)
